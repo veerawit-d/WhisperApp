@@ -34,6 +34,14 @@ namespace WhisperWin
             else Start();
         }
 
+        /// Stops active capture and releases the controller's timers and native resources.
+        public void Dispose()
+        {
+            _levelTimer.Stop();
+            _levelTimer.Dispose();
+            _recorder.Dispose();
+        }
+
         public void Start()
         {
             if (_processing || _recorder.IsRecording) return;
@@ -112,10 +120,21 @@ namespace WhisperWin
             if (_cfg.UseCorrection && _cfg.LlmConfigured())
             {
                 SetStage(Stage.Correcting, "AI กำลังเกลาข้อความ…");
-                var corrected = await LlmClient.CorrectAsync(_cfg, text, _cfg.Language);
-                if (corrected != null) text = corrected;
+                try
+                {
+                    var corrected = await LlmClient.CorrectAsync(_cfg, text, _cfg.Language);
+                    if (corrected != null) text = corrected;
+                }
+                catch (Exception ex)
+                {
+                    // Correction is an enhancement; a provider failure must not lose usable STT text.
+                    Log.Error("LLM correction: " + ex);
+                }
             }
 
+            // Apply deterministic rules last so proper nouns are preserved even when the LLM
+            // ignores the hint or AI correction is disabled.
+            text = CorrectionDictionary.Apply(text);
             Paster.Paste(text); // on UI thread — clipboard needs STA
 
             var snippet = text.Length <= 28 ? text : text.Substring(0, 28) + "…";

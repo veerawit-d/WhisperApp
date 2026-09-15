@@ -43,7 +43,13 @@ namespace WhisperWin
         {
             var dir = string.IsNullOrWhiteSpace(cfg.LocalWhisperModelDir) ? DefaultModelDir : cfg.LocalWhisperModelDir;
             if (!Directory.Exists(dir)) return null;
-            var bins = Directory.GetFiles(dir, "*.bin");
+            string[] bins;
+            try { bins = Directory.GetFiles(dir, "*.bin"); }
+            catch (Exception ex)
+            {
+                Log.Error("whisper model scan: " + ex.Message);
+                return null;
+            }
             if (bins.Length == 0) return null;
 
             var priority = new[] { "large-v3", "large", "medium", "small", "base", "tiny" };
@@ -66,10 +72,20 @@ namespace WhisperWin
                 if (model == null)
                     throw new InvalidOperationException("ไม่พบไฟล์โมเดล ggml-*.bin ใน " + DefaultModelDir);
 
+                var args = "-m \"" + model + "\" -f \"" + wavPath + "\" -nt -np";
+                // Omitting -l lets whisper.cpp auto-detect; "auto" is not accepted by
+                // every Windows build of whisper-cli.
+                if (!string.IsNullOrEmpty(language) && language != "auto")
+                    args += " -l " + language;
+
+                var workingDirectory = Path.GetDirectoryName(exe);
+                if (string.IsNullOrEmpty(workingDirectory)) workingDirectory = Environment.CurrentDirectory;
+
                 var psi = new ProcessStartInfo
                 {
                     FileName = exe,
-                    Arguments = "-m \"" + model + "\" -f \"" + wavPath + "\" -nt -l " + language,
+                    Arguments = args,
+                    WorkingDirectory = workingDirectory,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
@@ -79,12 +95,19 @@ namespace WhisperWin
 
                 using (var proc = Process.Start(psi))
                 {
-                    var stdout = proc.StandardOutput.ReadToEnd();
-                    var stderr = proc.StandardError.ReadToEnd();
+                    if (proc == null) throw new InvalidOperationException("เริ่ม whisper-cli.exe ไม่สำเร็จ");
+                    // Drain both pipes concurrently so a verbose whisper build cannot deadlock.
+                    var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                    var stderrTask = proc.StandardError.ReadToEndAsync();
                     proc.WaitForExit();
+                    var stdout = stdoutTask.Result;
+                    var stderr = stderrTask.Result;
 
                     if (!string.IsNullOrWhiteSpace(stderr))
                         Log.Info("whisper stderr: " + SttClient.Truncate(stderr, 500));
+
+                    if (proc.ExitCode != 0 && string.IsNullOrWhiteSpace(stdout))
+                        throw new InvalidOperationException("whisper.cpp ทำงานไม่สำเร็จ (exit code " + proc.ExitCode + ")");
 
                     // strip ANSI color codes (ESC[...m) in case whisper outputs color
                     var ansi = (char)27 + "\\[[0-9;]*m";

@@ -33,6 +33,7 @@ namespace WhisperWin
         }
 
         private static readonly KeyItem[] HotkeyChoices = BuildKeyChoices();
+        private static readonly object[] LanguageChoices = BuildLanguageChoices();
 
         private static KeyItem[] BuildKeyChoices()
         {
@@ -54,6 +55,13 @@ namespace WhisperWin
             return list.ToArray();
         }
 
+        private static object[] BuildLanguageChoices()
+        {
+            var list = new List<object> { Languages.Auto };
+            foreach (var language in Languages.All) list.Add(language);
+            return list.ToArray();
+        }
+
         private static readonly HashSet<int> ModifierVks = new HashSet<int> { 0x14, 0xA1, 0xA3, 0xA5 };
 
         public SettingsForm(AppConfig cfg)
@@ -72,7 +80,7 @@ namespace WhisperWin
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(560, 716);
+            ClientSize = new Size(560, 742);
 
             BuildUi();
             LoadFromConfig();
@@ -105,7 +113,7 @@ namespace WhisperWin
 
             // --- General group ---
             var gGen = AddGroup("ทั่วไป", y, 148);
-            _cboLang = AddCombo(gGen, "ภาษาที่พูด", 26, new object[] { "ไทย", "English", "ตรวจอัตโนมัติ" });
+            _cboLang = AddCombo(gGen, "ภาษาที่พูด", 26, LanguageChoices);
 
             AddLabel(gGen, "ปุ่มลัด", 60);
             _cboKey = new ComboBox { Left = 130, Top = 56, Width = 110, DropDownStyle = ComboBoxStyle.DropDownList };
@@ -192,7 +200,9 @@ namespace WhisperWin
             _llmPrev = CurrentLlm().Id;
             LoadLlmFields(CurrentLlm());
 
-            _cboLang.SelectedIndex = _cfg.Language == "en" ? 1 : (_cfg.Language == "auto" ? 2 : 0);
+            var languageIndex = Array.FindIndex(LanguageChoices,
+                delegate(object item) { return ((Language)item).Code == _cfg.Language; });
+            _cboLang.SelectedIndex = languageIndex >= 0 ? languageIndex : 2;
 
             int keyIdx = Array.FindIndex(HotkeyChoices, k => k.Vk == _cfg.HotkeyVk);
             _cboKey.SelectedIndex = keyIdx >= 0 ? keyIdx : 8; // F9
@@ -311,7 +321,8 @@ namespace WhisperWin
             _cfg.LlmModels.Clear(); foreach (var kv in _llmModels) _cfg.LlmModels[kv.Key] = kv.Value;
             _cfg.LlmEndpoints.Clear(); foreach (var kv in _llmEndpoints) _cfg.LlmEndpoints[kv.Key] = kv.Value;
 
-            _cfg.Language = _cboLang.SelectedIndex == 1 ? "en" : (_cboLang.SelectedIndex == 2 ? "auto" : "th");
+            var language = _cboLang.SelectedItem as Language;
+            _cfg.Language = language == null ? "th" : language.Code;
 
             var key = (KeyItem)_cboKey.SelectedItem;
             if (key != null) _cfg.HotkeyVk = key.Vk;

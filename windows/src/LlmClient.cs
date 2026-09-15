@@ -28,9 +28,10 @@ namespace WhisperWin
             var model = cfg.LlmModel(p);
 
             string langHint;
-            if (language == "th") langHint = "The text is in Thai";
-            else if (language == "en") langHint = "The text is in English";
-            else langHint = "The text may be in Thai or English — keep the original language";
+            if (language == "auto")
+                langHint = "The text may be in any language — keep the original language";
+            else
+                langHint = "The text is in " + Languages.NameOf(language);
 
             var systemPrompt =
                 "You are a text correction assistant for speech-to-text output, which often contains\n" +
@@ -41,6 +42,13 @@ namespace WhisperWin
                 "- Do NOT add new content, summarize, translate, or change word endings/speaker gender\n" +
                 "- Return ONLY the corrected text — no explanations, no quotation marks\n" +
                 langHint;
+
+            var dictionaryHint = CorrectionDictionary.HintForPrompt;
+            if (!string.IsNullOrEmpty(dictionaryHint))
+            {
+                systemPrompt += "\n\nThe user's own known corrections for their speech — apply these where the meaning matches:\n" +
+                                dictionaryHint;
+            }
 
             Dictionary<string, object> body;
             if (p.Style == LlmStyle.OpenAI)

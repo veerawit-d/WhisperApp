@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -23,10 +24,13 @@ namespace WhisperWin
         private readonly Icon _iconBusy = TrayIcons.Make(Color.FromArgb(255, 170, 60));
 
         private ToolStripMenuItem _miToggle;
+        private ToolStripMenuItem _miCloud;
         private ToolStripMenuItem _miCorrection;
         private ToolStripMenuItem _miAutostart;
-        private ToolStripMenuItem _miLangTh, _miLangEn, _miLangAuto;
+        private readonly List<ToolStripMenuItem> _languageItems = new List<ToolStripMenuItem>();
         private SettingsForm _settings;
+        private DictionaryForm _dictionary;
+        private bool _syncingMenu;
 
         public TrayContext()
         {
@@ -64,10 +68,16 @@ namespace WhisperWin
 
             Log.Info("WhisperApp started (hotkey: " + _hotkey.DisplayString + ")");
 
-            if (!_cfg.SttConfigured())
+            var needsSetup = _cfg.UseCloudStt
+                ? !_cfg.SttConfigured()
+                : LocalWhisper.FindExe(_cfg) == null || LocalWhisper.FindModel(_cfg) == null;
+            if (needsSetup)
             {
                 _tray.ShowBalloonTip(6000, "WhisperApp",
-                    "ยังไม่ได้ตั้งค่า API key — เปิดหน้าตั้งค่าเพื่อเริ่มใช้งาน", ToolTipIcon.Info);
+                    _cfg.UseCloudStt
+                        ? "ยังไม่ได้ตั้งค่า API key — เปิดหน้าตั้งค่าเพื่อเริ่มใช้งาน"
+                        : "ยังไม่พบ whisper.cpp/model — เปิดหน้าตั้งค่าเพื่อดูวิธีตั้งค่า",
+                    ToolTipIcon.Info);
                 OpenSettings();
             }
         }
@@ -94,24 +104,47 @@ namespace WhisperWin
             menu.Items.Add(_miToggle);
             menu.Items.Add(new ToolStripSeparator());
 
-            var lang = new ToolStripMenuItem("ภาษา");
-            _miLangTh = AddLang(lang, "ไทย", "th");
-            _miLangEn = AddLang(lang, "English", "en");
-            _miLangAuto = AddLang(lang, "ตรวจอัตโนมัติ", "auto");
-            menu.Items.Add(lang);
+            _miCloud = new ToolStripMenuItem("ใช้ STT บน cloud") { CheckOnClick = true };
+            _miCloud.CheckedChanged += delegate
+            {
+                if (_syncingMenu) return;
+                _cfg.UseCloudStt = _miCloud.Checked;
+                _cfg.Save();
+            };
+            menu.Items.Add(_miCloud);
 
             _miCorrection = new ToolStripMenuItem("เกลาข้อความด้วย AI") { CheckOnClick = true };
             _miCorrection.CheckedChanged += delegate
             {
+                if (_syncingMenu) return;
                 _cfg.UseCorrection = _miCorrection.Checked;
                 _cfg.Save();
             };
             menu.Items.Add(_miCorrection);
             menu.Items.Add(new ToolStripSeparator());
 
+            var lang = new ToolStripMenuItem("ภาษา");
+            AddLang(lang, Languages.Auto);
+            lang.DropDownItems.Add(new ToolStripSeparator());
+            foreach (var language in Languages.All) AddLang(lang, language);
+            menu.Items.Add(lang);
+            menu.Items.Add(new ToolStripSeparator());
+
             var settings = new ToolStripMenuItem("ตั้งค่า…");
             settings.Click += delegate { OpenSettings(); };
             menu.Items.Add(settings);
+
+            var updates = new ToolStripMenuItem("ตรวจสอบเวอร์ชันใหม่…");
+            updates.Click += delegate { OpenUrl("https://github.com/Gamezxz/WhisperApp/releases/latest"); };
+            menu.Items.Add(updates);
+
+            var whatsNew = new ToolStripMenuItem("What's New…");
+            whatsNew.Click += delegate { OpenUrl("https://gamezxz.github.io/WhisperApp/changelog"); };
+            menu.Items.Add(whatsNew);
+
+            var dictionary = new ToolStripMenuItem("พจนานุกรมส่วนตัว…");
+            dictionary.Click += delegate { OpenDictionary(); };
+            menu.Items.Add(dictionary);
 
             _miAutostart = new ToolStripMenuItem("เริ่มพร้อม Windows") { CheckOnClick = true };
             _miAutostart.CheckedChanged += delegate { Autostart.Set(_miAutostart.Checked); };
@@ -150,17 +183,17 @@ namespace WhisperWin
             return menu;
         }
 
-        private ToolStripMenuItem AddLang(ToolStripMenuItem parent, string label, string code)
+        private void AddLang(ToolStripMenuItem parent, Language language)
         {
-            var item = new ToolStripMenuItem(label);
+            var item = new ToolStripMenuItem(language.Name) { Tag = language.Code };
             item.Click += delegate
             {
-                _cfg.Language = code;
+                _cfg.Language = (string)item.Tag;
                 _cfg.Save();
                 UpdateTexts();
             };
             parent.DropDownItems.Add(item);
-            return item;
+            _languageItems.Add(item);
         }
 
         private void OpenSettings()
@@ -178,6 +211,31 @@ namespace WhisperWin
             };
             _settings.Show();
             _settings.Activate();
+        }
+
+        private void OpenDictionary()
+        {
+            if (_dictionary != null && !_dictionary.IsDisposed)
+            {
+                _dictionary.Activate();
+                return;
+            }
+            _dictionary = new DictionaryForm();
+            _dictionary.Show();
+            _dictionary.Activate();
+        }
+
+        private static void OpenUrl(string url)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception ex) { Log.Error("Open URL: " + ex.Message); }
         }
 
         private void OnStageChanged(Stage stage)
@@ -202,11 +260,16 @@ namespace WhisperWin
         private void UpdateTexts()
         {
             _miToggle.Text = "เริ่มพูด (" + _hotkey.DisplayString + ")";
-            _miCorrection.Checked = _cfg.UseCorrection;
-            _miAutostart.Checked = Autostart.IsEnabled();
-            _miLangTh.Checked = _cfg.Language == "th";
-            _miLangEn.Checked = _cfg.Language == "en";
-            _miLangAuto.Checked = _cfg.Language == "auto";
+            _syncingMenu = true;
+            try
+            {
+                _miCloud.Checked = _cfg.UseCloudStt;
+                _miCorrection.Checked = _cfg.UseCorrection;
+                _miAutostart.Checked = Autostart.IsEnabled();
+                foreach (var item in _languageItems)
+                    item.Checked = (string)item.Tag == _cfg.Language;
+            }
+            finally { _syncingMenu = false; }
 
             var tip = "WhisperApp — กด " + _hotkey.DisplayString + (_cfg.HotkeyHoldMode ? " ค้างเพื่อพูด" : " เพื่อเริ่ม/หยุด");
             _tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
@@ -215,7 +278,13 @@ namespace WhisperWin
         private void ExitApp()
         {
             _tray.Visible = false;
-            _hotkey.Uninstall();
+            _tray.Dispose();
+            _hotkey.Dispose();
+            _controller.Dispose();
+            _overlay.Dispose();
+            _iconIdle.Dispose();
+            _iconRec.Dispose();
+            _iconBusy.Dispose();
             ExitThread();
         }
     }
@@ -250,12 +319,19 @@ namespace WhisperWin
                 }
 
                 var hIcon = bmp.GetHicon();
-                using (var tmp = Icon.FromHandle(hIcon))
+                try
                 {
-                    return (Icon)tmp.Clone();
+                    using (var tmp = Icon.FromHandle(hIcon))
+                    {
+                        return (Icon)tmp.Clone();
+                    }
                 }
+                finally { DestroyIcon(hIcon); }
             }
         }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool DestroyIcon(IntPtr handle);
     }
 
     /// Start-with-Windows via HKCU Run key.
@@ -280,7 +356,7 @@ namespace WhisperWin
         {
             try
             {
-                using (var rk = Registry.CurrentUser.OpenSubKey(RunKey, true))
+                using (var rk = Registry.CurrentUser.CreateSubKey(RunKey))
                 {
                     if (rk == null) return;
                     if (on) rk.SetValue(Name, "\"" + Application.ExecutablePath + "\"");

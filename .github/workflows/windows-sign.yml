@@ -1,0 +1,51 @@
+name: Windows signed release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build-sign:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build Windows binary
+        shell: cmd
+        run: windows\build.bat
+
+      - name: Upload unsigned artifact
+        id: upload-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisperapp-windows-unsigned-${{ github.ref_name }}
+          path: windows\WhisperApp.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Submit signing request to SignPath Foundation
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisperapp-windows-signed-${{ github.ref_name }}
+          path: signed
+          if-no-files-found: error
+          retention-days: 30

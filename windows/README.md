@@ -5,6 +5,10 @@
 
 พูด → ถอดเสียง (Groq / OpenAI / ElevenLabs / whisper.cpp ในเครื่อง) → AI เกลาข้อความ (แก้คำผิด เว้นวรรค วรรคตอน) → วางลงแอปที่โฟกัสอยู่ผ่าน Ctrl+V
 
+พอร์ตนี้คงความสามารถหลักของเวอร์ชัน macOS ไว้ครบ: เลือก provider/model/endpoint แยกกัน,
+รองรับ 16 ภาษา + auto-detect, floating status/waveform, Dictionary แบบแก้ไขแล้วมีผลทันที,
+cloud/local STT, AI correction, global hotkey, auto-paste และเริ่มพร้อม Windows
+
 ## เริ่มใช้งาน
 
 1. ดับเบิลคลิก `run.bat` (build อัตโนมัติครั้งแรก แล้วเปิดแอปเป็นไอคอนไมค์ที่ tray)
@@ -33,6 +37,9 @@ API key ใส่ในหน้าตั้งค่า หรือใช้�
 
 การตั้งค่าทั้งหมดเก็บที่ `%APPDATA%\WhisperApp\config.json` (log อยู่ที่ `app.log` ข้างกัน)
 
+พจนานุกรมส่วนตัวเปิดจาก tray → `พจนานุกรมส่วนตัว…` และเก็บที่
+`%APPDATA%\WhisperApp\dictionary.txt` ในรูปแบบ `คำที่ฟังผิด -> คำที่ถูก`
+
 ## whisper.cpp ในเครื่อง (ออฟไลน์ — ไม่บังคับ)
 
 1. โหลด whisper.cpp binary ของ Windows (`whisper-cli.exe`) วางที่ `%USERPROFILE%\.whisper-models\` (หรือใน PATH)
@@ -45,12 +52,27 @@ API key ใส่ในหน้าตั้งค่า หรือใช้�
 จาก VS 2019 Build Tools (fallback เป็น csc ของ .NET Framework):
 
 ```bat
-build.bat        รี่คอมไพล์ → WhisperApp.exe (ไฟล์เดียว ไม่มี dependency)
+build.bat        คอมไพล์ → WhisperApp.exe (ไฟล์เดียว ไม่มี dependency เพิ่ม)
 run.bat          build ถ้ายังไม่มี exe แล้วเปิดแอป
 WhisperApp.exe --selftest [out.txt]   ทดสอบไมค์/config แบบไม่มี UI
 ```
 
+ตัวบันทึกเสียงเขียน PCM ลง temporary WAV แบบ streaming และ cloud STT อ่านไฟล์แบบ streaming
+จึงไม่เก็บไฟล์เสียงทั้งก้อนไว้ซ้ำใน memory ระหว่างอัดหรือ upload
+
 เปิดติดเครื่องอัตโนมัติ: ติ๊ก "เริ่มพร้อม Windows" ในหน้าตั้งค่าหรือเมนู tray (เขียน HKCU Run key)
+
+## การ sign สำหรับ Smart App Control
+
+โปรเจกต์มี workflow สำหรับ SignPath Foundation ที่
+`.github/workflows/windows-sign.yml` และ policy ที่
+`.signpath/policies/whisperapp/windows-release.yml` โดยจะ build บน
+GitHub-hosted runner แล้วส่ง artifact ให้ SignPath sign พร้อม manual approval
+
+SignPath Foundation ไม่ส่งมอบ private key หรือไฟล์ `.pfx` ให้ผู้ใช้ แต่ sign
+ผ่าน HSM ของ SignPath แล้วคืน signed artifact ซึ่งเป็นแนวทางที่เหมาะกับ
+Smart App Control มากกว่า self-signed certificate รายละเอียด policy อยู่ที่
+`CODE_SIGNING_POLICY.md`
 
 ## แก้ปัญหา
 

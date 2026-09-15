@@ -24,9 +24,9 @@ namespace WhisperWin
 
         private static string LangCode(string language, SttStyle style)
         {
-            if (language == "th") return style == SttStyle.ElevenLabs ? "tha" : "th";
-            if (language == "en") return style == SttStyle.ElevenLabs ? "eng" : "en";
-            return null; // auto → let the provider detect
+            var selected = Languages.Find(language);
+            if (selected == null || selected.Code == "auto") return null;
+            return style == SttStyle.ElevenLabs ? selected.Iso3 : selected.Code;
         }
 
         /// Returns transcribed text, or throws with a readable message.
@@ -40,8 +40,9 @@ namespace WhisperWin
             if (string.IsNullOrEmpty(endpoint))
                 throw new InvalidOperationException("ยังไม่ได้ตั้งค่า endpoint ของ " + p.Name);
 
-            byte[] audio = File.ReadAllBytes(wavPath);
-
+            // Stream the recording instead of loading a second full copy into the managed heap.
+            using (var audio = new FileStream(wavPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                                               32 * 1024, FileOptions.SequentialScan))
             using (var form = new MultipartFormDataContent("Boundary-" + Guid.NewGuid().ToString("N")))
             using (var req = new HttpRequestMessage(HttpMethod.Post, endpoint))
             {
@@ -56,7 +57,7 @@ namespace WhisperWin
                 if (lang != null)
                     form.Add(new StringContent(lang), langField);
 
-                var fileContent = new ByteArrayContent(audio);
+                var fileContent = new StreamContent(audio);
                 fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse("audio/wav");
                 form.Add(fileContent, "file", "audio.wav");
 

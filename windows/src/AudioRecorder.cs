@@ -7,7 +7,7 @@ namespace WhisperWin
 {
     /// Records microphone audio to a 16 kHz mono 16-bit WAV file (the format Whisper expects)
     /// using the winmm waveIn API. Exposes a live RMS level (0..1) for the waveform overlay.
-    public class AudioRecorder
+    public class AudioRecorder : IDisposable
     {
         private const int SampleRate = 16000;
         private const int BufferMs = 100;
@@ -19,7 +19,10 @@ namespace WhisperWin
         private IntPtr _hWaveIn = IntPtr.Zero;
         private IntPtr[] _headers = new IntPtr[BufferCount];
         private IntPtr[] _buffers = new IntPtr[BufferCount];
-        private MemoryStream _pcm;
+        private FileStream _wavStream;
+        private string _wavPath;
+        private long _pcmBytes;
+        private readonly byte[] _chunk = new byte[BufferBytes];
         private Thread _pollThread;
         private volatile bool _running;
         private int _headerSize;
@@ -59,13 +62,29 @@ namespace WhisperWin
                 _headerSize = Marshal.SizeOf(typeof(WAVEHDR));
                 _flagsOffset = (int)Marshal.OffsetOf(typeof(WAVEHDR), "dwFlags");
                 _bytesOffset = (int)Marshal.OffsetOf(typeof(WAVEHDR), "dwBytesRecorded");
-                _pcm = new MemoryStream();
-
-                for (int i = 0; i < BufferCount; i++)
+                _wavPath = Path.Combine(Path.GetTempPath(), "whisper_" + Guid.NewGuid().ToString("N") + ".wav");
+                try
                 {
-                    _buffers[i] = Marshal.AllocHGlobal(BufferBytes);
-                    _headers[i] = Marshal.AllocHGlobal(_headerSize);
-                    PrepareAndAdd(i);
+                    // Stream PCM directly to disk. This keeps memory bounded even if the
+                    // user dictates for a long time instead of retaining the whole recording.
+                    _wavStream = new FileStream(_wavPath, FileMode.Create, FileAccess.ReadWrite,
+                                                FileShare.Read, 32 * 1024, FileOptions.SequentialScan);
+                    WriteWavHeader(_wavStream, 0);
+                    _pcmBytes = 0;
+
+                    for (int i = 0; i < BufferCount; i++)
+                    {
+                        _buffers[i] = Marshal.AllocHGlobal(BufferBytes);
+                        _headers[i] = Marshal.AllocHGlobal(_headerSize);
+                        PrepareAndAdd(i);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("Audio buffer setup: " + ex.Message);
+                    CleanupNative();
+                    CloseRecordingFile(false);
+                    return false;
                 }
 
                 rc = waveInStart(_hWaveIn);
@@ -73,6 +92,7 @@ namespace WhisperWin
                 {
                     Log.Error("waveInStart failed rc=" + rc);
                     CleanupNative();
+                    CloseRecordingFile(false);
                     return false;
                 }
 
@@ -100,7 +120,8 @@ namespace WhisperWin
 
             if (poll != null) poll.Join(500);
 
-            byte[] data;
+            string path = null;
+            long recordedBytes = 0;
             lock (_gate)
             {
                 if (_hWaveIn != IntPtr.Zero)
@@ -109,25 +130,30 @@ namespace WhisperWin
                     waveInReset(_hWaveIn); // marks all pending buffers done
                     DrainDoneBuffers();
                 }
-                data = _pcm != null ? _pcm.ToArray() : new byte[0];
+
+                if (_wavStream != null && _pcmBytes > 0)
+                {
+                    try
+                    {
+                        recordedBytes = _pcmBytes;
+                        WriteWavHeader(_wavStream, _pcmBytes);
+                        _wavStream.Flush();
+                        path = _wavPath;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error("WAV finalize: " + ex.Message);
+                    }
+                }
+
+                CloseRecordingFile(path != null);
                 CleanupNative();
                 Level = 0;
             }
 
-            if (data.Length == 0) return null;
-
-            var path = Path.Combine(Path.GetTempPath(), "whisper_" + Guid.NewGuid().ToString("N") + ".wav");
-            try
-            {
-                WriteWav(path, data);
-            }
-            catch (Exception ex)
-            {
-                Log.Error("WAV write: " + ex.Message);
-                return null;
-            }
-            Log.Info("Recording stopped → " + path + " (" + data.Length + " bytes, " +
-                     (data.Length / (double)(SampleRate * 2)).ToString("0.00") + "s)");
+            if (path == null) return null;
+            Log.Info("Recording stopped → " + path + " (" + recordedBytes + " bytes, " +
+                     (recordedBytes / (double)(SampleRate * 2)).ToString("0.00") + "s)");
             return path;
         }
 
@@ -137,8 +163,28 @@ namespace WhisperWin
             {
                 lock (_gate)
                 {
-                    return _pcm == null ? 0 : _pcm.Length / (double)(SampleRate * 2);
+                    return _pcmBytes / (double)(SampleRate * 2);
                 }
+            }
+        }
+
+        /// Stops capture and releases all native buffers without keeping a recording file.
+        public void Dispose()
+        {
+            if (IsRecording)
+            {
+                var path = Stop();
+                if (path != null)
+                {
+                    try { File.Delete(path); } catch { }
+                }
+                return;
+            }
+
+            lock (_gate)
+            {
+                CloseRecordingFile(false);
+                CleanupNative();
             }
         }
 
@@ -184,10 +230,14 @@ namespace WhisperWin
         private void ConsumeBuffer(int i)
         {
             int bytes = Marshal.ReadInt32(_headers[i], _bytesOffset);
+            bytes = Math.Max(0, Math.Min(BufferBytes, bytes));
             if (bytes <= 0) return;
-            var chunk = new byte[bytes];
-            Marshal.Copy(_buffers[i], chunk, 0, bytes);
-            _pcm.Write(chunk, 0, bytes);
+            Marshal.Copy(_buffers[i], _chunk, 0, bytes);
+            if (_wavStream != null)
+            {
+                _wavStream.Write(_chunk, 0, bytes);
+                _pcmBytes += bytes;
+            }
 
             // RMS level for waveform display — same ×8 visibility scale as the macOS version
             int n = bytes / 2;
@@ -196,7 +246,7 @@ namespace WhisperWin
                 double sum = 0;
                 for (int s = 0; s < n; s++)
                 {
-                    short v = (short)(chunk[s * 2] | (chunk[s * 2 + 1] << 8));
+                    short v = (short)(_chunk[s * 2] | (_chunk[s * 2 + 1] << 8));
                     double f = v / 32768.0;
                     sum += f * f;
                 }
@@ -233,26 +283,59 @@ namespace WhisperWin
             }
         }
 
-        private static void WriteWav(string path, byte[] pcm)
+        private void CloseRecordingFile(bool keep)
         {
-            using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
-            using (var w = new BinaryWriter(fs))
+            var path = _wavPath;
+            try
             {
-                w.Write(new[] { 'R', 'I', 'F', 'F' });
-                w.Write(36 + pcm.Length);
-                w.Write(new[] { 'W', 'A', 'V', 'E' });
-                w.Write(new[] { 'f', 'm', 't', ' ' });
-                w.Write(16);                 // fmt chunk size
-                w.Write((short)1);           // PCM
-                w.Write((short)1);           // mono
-                w.Write(SampleRate);
-                w.Write(SampleRate * 2);     // byte rate
-                w.Write((short)2);           // block align
-                w.Write((short)16);          // bits per sample
-                w.Write(new[] { 'd', 'a', 't', 'a' });
-                w.Write(pcm.Length);
-                w.Write(pcm);
+                if (_wavStream != null) _wavStream.Dispose();
             }
+            catch (Exception ex) { Log.Error("WAV close: " + ex.Message); }
+            _wavStream = null;
+            _wavPath = null;
+            _pcmBytes = 0;
+
+            if (!keep && path != null)
+            {
+                try { File.Delete(path); } catch { }
+            }
+        }
+
+        private static void WriteWavHeader(Stream stream, long pcmBytes)
+        {
+            var header = new byte[44];
+            Buffer.BlockCopy(System.Text.Encoding.ASCII.GetBytes("RIFF"), 0, header, 0, 4);
+            Buffer.BlockCopy(System.Text.Encoding.ASCII.GetBytes("WAVE"), 0, header, 8, 4);
+            Buffer.BlockCopy(System.Text.Encoding.ASCII.GetBytes("fmt "), 0, header, 12, 4);
+            Buffer.BlockCopy(System.Text.Encoding.ASCII.GetBytes("data"), 0, header, 36, 4);
+
+            int dataLength = pcmBytes > int.MaxValue ? int.MaxValue : (int)Math.Max(0, pcmBytes);
+            int riffLength = dataLength > int.MaxValue - 36 ? int.MaxValue : dataLength + 36;
+            WriteInt32(header, 4, riffLength);
+            WriteInt32(header, 16, 16);
+            WriteInt16(header, 20, 1); // PCM
+            WriteInt16(header, 22, 1); // mono
+            WriteInt32(header, 24, SampleRate);
+            WriteInt32(header, 28, SampleRate * 2);
+            WriteInt16(header, 32, 2);
+            WriteInt16(header, 34, 16);
+            WriteInt32(header, 40, dataLength);
+
+            stream.Position = 0;
+            stream.Write(header, 0, header.Length);
+            stream.Position = stream.Length;
+        }
+
+        private static void WriteInt16(byte[] bytes, int offset, short value)
+        {
+            var raw = BitConverter.GetBytes(value);
+            Buffer.BlockCopy(raw, 0, bytes, offset, raw.Length);
+        }
+
+        private static void WriteInt32(byte[] bytes, int offset, int value)
+        {
+            var raw = BitConverter.GetBytes(value);
+            Buffer.BlockCopy(raw, 0, bytes, offset, raw.Length);
         }
 
         // ---------- P/Invoke ----------

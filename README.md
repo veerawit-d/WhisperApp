@@ -44,6 +44,20 @@ export GROQ_API_KEY="gsk_..."
 
 ## Build from source
 
+### Windows port
+
+A native Windows system-tray build is available under [`windows/`](windows/README.md).
+Run `windows\run.bat` on Windows 10/11 to build and launch `WhisperApp.exe`.
+It keeps the dictation flow, provider options, local whisper.cpp mode, dictionary,
+global hotkey, waveform overlay and auto-paste while streaming recordings to keep
+memory use bounded.
+
+### Windows code signing policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+See [`CODE_SIGNING_POLICY.md`](CODE_SIGNING_POLICY.md) and the checked-in
+SignPath workflow for the release signing rules.
+
 ```bash
 git clone https://github.com/Gamezxz/WhisperApp
 cd WhisperApp
